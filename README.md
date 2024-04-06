@@ -1,2 +1,2 @@
 # ocean
-go implementations of common data structures
+记录日常开发/学习中的通用解决方案
