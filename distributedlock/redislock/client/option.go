@@ -3,11 +3,11 @@ package client
 import "time"
 
 const (
-	// 默认连接池超过 10 s 释放连接
+	// DefaultIdleTimeout 默认连接池超过 10 s 释放连接
 	DefaultIdleTimeout = time.Second * 10
-	// 默认最大激活连接数
+	// DefaultMaxActive 默认最大激活连接数
 	DefaultMaxActive = 100
-	// 默认最大空闲连接数
+	// DefaultMaxIdle 默认最大空闲连接数
 	DefaultMaxIdle = 20
 )
 

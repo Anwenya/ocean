@@ -1,16 +1,22 @@
 package redislock
 
 import (
-	"github.com/Anwenya/ocean/distributedlock/redislock/client"
 	"time"
 )
 
 const (
 	// DefaultLockExpire 默认的分布式锁过期时间
 	DefaultLockExpire = time.Second * 30
-	// WatchDogWorkStep 看门狗工作时间间隙/续约间隔
-	WatchDogWorkStep = time.Second * 10
 )
+
+type LockOptions struct {
+	// 是否会阻塞抢锁
+	isBlock bool
+	// 阻塞抢锁的超时时间
+	blockWaiting time.Duration
+	// 锁的过期时间
+	expire time.Duration
+}
 
 type LockOption func(*LockOptions)
 
@@ -43,46 +49,6 @@ func repairLock(o *LockOptions) {
 		return
 	}
 
-	// 显式指定锁的过期时间 则此时会启动看门狗
+	// 不指定锁的过期时间使用默认值
 	o.expire = DefaultLockExpire
-	o.watchDogMode = true
-}
-
-type LockOptions struct {
-	isBlock      bool
-	blockWaiting time.Duration
-	expire       time.Duration
-	watchDogMode bool
-}
-
-type RedLockOption func(*RedLockOptions)
-
-type RedLockOptions struct {
-	singleNodesTimeout time.Duration
-	expireDuration     time.Duration
-}
-
-func WithSingleNodesTimeout(singleNodesTimeout time.Duration) RedLockOption {
-	return func(o *RedLockOptions) {
-		o.singleNodesTimeout = singleNodesTimeout
-	}
-}
-
-func WithRedLockExpireDuration(expireDuration time.Duration) RedLockOption {
-	return func(o *RedLockOptions) {
-		o.expireDuration = expireDuration
-	}
-}
-
-type SingleNodeConf struct {
-	Network  string
-	Address  string
-	Password string
-	Opts     []client.Option
-}
-
-func repairRedLock(o *RedLockOptions) {
-	if o.singleNodesTimeout <= 0 {
-		o.singleNodesTimeout = DefaultSingleLockTimeout
-	}
 }

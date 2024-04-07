@@ -8,12 +8,15 @@ import (
 	"github.com/Anwenya/ocean/distributedlock/redislock/lua"
 	"github.com/Anwenya/ocean/os"
 	"github.com/gomodule/redigo/redis"
+	"strings"
 	"sync/atomic"
 	"time"
 )
 
-const RedisLockKeyPrefix = "REDIS_LOCK_PREFIX_"
+// RedisLockKeyPrefix 前缀
+const RedisLockKeyPrefix = "RLP:"
 
+// ErrLockAcquiredByOthers 锁已经被其他人持有
 var ErrLockAcquiredByOthers = errors.New("lock is acquired by others")
 
 var ErrNil = redis.ErrNil
@@ -25,14 +28,16 @@ func IsRetryableErr(err error) bool {
 // RedisLock 基于redis的分布式锁
 type RedisLock struct {
 	LockOptions
-	key    string
+	// 锁的key
+	key string
+	// 当前身份标识
 	token  string
 	client client.LockClient
 
-	// 看门狗运作标识
-	runningDog int32
-	// 停止看门狗
-	stopDog context.CancelFunc
+	// 正在续约标识
+	leasing int32
+	// 停止续约
+	stopLease context.CancelFunc
 }
 
 func NewRedisLock(key string, client client.LockClient, opts ...LockOption) *RedisLock {
@@ -51,13 +56,14 @@ func NewRedisLock(key string, client client.LockClient, opts ...LockOption) *Red
 	return &rl
 }
 
+// Lock 加锁
 func (rl *RedisLock) Lock(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
 			return
 		}
 		// 抢锁成功 启动续约机制
-		rl.watchDog(ctx)
+		rl.startLease(ctx)
 	}()
 
 	// 尝试抢锁
@@ -85,18 +91,21 @@ func (rl *RedisLock) Lock(ctx context.Context) (err error) {
 
 // 尝试抢锁
 func (rl *RedisLock) tryLock(ctx context.Context) error {
-	// 先查询锁是否属于自己
-	reply, err := rl.client.SetNEX(ctx, rl.getLockKey(), rl.token, rl.expire)
+	// 抢锁
+	keysAndArgs := []interface{}{rl.getLockKey(), rl.token, int(rl.expire.Seconds())}
+
+	// 执行抢锁逻辑
+	reply, err := rl.client.Eval(ctx, lua.LuaLock, 1, keysAndArgs)
 	if err != nil {
 		return err
 	}
 
-	// 其他非预期结果
-	if reply != 1 {
-		return fmt.Errorf("tryLock:reply: %d, err: %w", reply, ErrLockAcquiredByOthers)
+	// 成功
+	if respStr, ok := reply.(string); ok && strings.ToLower(respStr) == "ok" {
+		return nil
 	}
-
-	return nil
+	// 其他情况视为失败
+	return ErrLockAcquiredByOthers
 }
 
 // 阻塞循环抢锁
@@ -130,26 +139,27 @@ func (rl *RedisLock) blockingLock(ctx context.Context) error {
 	return nil
 }
 
-// 启动看门狗 也就是 续约
-func (rl *RedisLock) watchDog(ctx context.Context) {
-	if !rl.watchDogMode {
-		return
+// 启动续约
+func (rl *RedisLock) startLease(ctx context.Context) {
+	// 在释放后立刻又抢到锁时等待前一次退出
+	for !atomic.CompareAndSwapInt32(&rl.leasing, 0, 1) {
 	}
 
-	for !atomic.CompareAndSwapInt32(&rl.runningDog, 0, 1) {
-	}
-
-	ctx, rl.stopDog = context.WithCancel(ctx)
+	ctx, rl.stopLease = context.WithCancel(ctx)
 	go func() {
 		defer func() {
-			atomic.StoreInt32(&rl.runningDog, 0)
+			atomic.StoreInt32(&rl.leasing, 0)
 		}()
-		rl.runWatchDog(ctx)
+		rl.runLeasing(ctx)
 	}()
 }
 
-func (rl *RedisLock) runWatchDog(ctx context.Context) {
-	ticker := time.NewTicker(WatchDogWorkStep * time.Second)
+// 续约
+func (rl *RedisLock) runLeasing(ctx context.Context) {
+	// 过期时间的 1/3
+	ticker := time.NewTicker(rl.expire / 3)
+	count := 0
+
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -157,17 +167,23 @@ func (rl *RedisLock) runWatchDog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
+			err := rl.DelayExpire(ctx, rl.expire)
+			if err != nil {
+				count++
+				// 连续续约失败5次
+				if count >= 5 {
+					return
+				}
+			}
+			count = 0
 		}
-
-		// 为避免因为网络延迟而导致锁被提前释放的问题 续约时需要把锁的过期时长额外增加 5 s
-		_ = rl.DelayExpire(ctx, WatchDogWorkStep+time.Second*5)
 	}
 }
 
 // DelayExpire 更新锁的过期时间
 func (rl *RedisLock) DelayExpire(ctx context.Context, expire time.Duration) error {
-	keysAndArgs := []interface{}{rl.getLockKey(), rl.token, expire.Seconds()}
-	reply, err := rl.client.Eval(ctx, lua.LuaCheckAndExpireDistributionLock, 1, keysAndArgs)
+	keysAndArgs := []interface{}{rl.getLockKey(), rl.token, int(expire.Seconds())}
+	reply, err := rl.client.Eval(ctx, lua.LuaLease, 1, keysAndArgs)
 	if err != nil {
 		return err
 	}
@@ -182,18 +198,19 @@ func (rl *RedisLock) DelayExpire(ctx context.Context, expire time.Duration) erro
 // Unlock 解锁
 func (rl *RedisLock) Unlock(ctx context.Context) error {
 	defer func() {
-		// 停止看门狗
-		if rl.stopDog != nil {
-			rl.stopDog()
+		// 停止续约
+		if rl.stopLease != nil {
+			rl.stopLease()
 		}
 	}()
 
 	keysAndArgs := []interface{}{rl.getLockKey(), rl.token}
-	reply, err := rl.client.Eval(ctx, lua.LuaCheckAndDeleteDistributionLock, 1, keysAndArgs)
+	reply, err := rl.client.Eval(ctx, lua.LuaUnlock, 1, keysAndArgs)
 	if err != nil {
 		return err
 	}
 
+	// 未持有锁
 	if ret, _ := reply.(int64); ret != 1 {
 		return errors.New("can not unlock without ownership of lock")
 	}
@@ -204,3 +221,5 @@ func (rl *RedisLock) Unlock(ctx context.Context) error {
 func (rl *RedisLock) getLockKey() string {
 	return RedisLockKeyPrefix + rl.key
 }
+
+// TODO:可重入锁
