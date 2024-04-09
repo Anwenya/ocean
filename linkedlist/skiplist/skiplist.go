@@ -234,5 +234,11 @@ func (s *Skiplist[K, V]) floor(target K) *node[K, V] {
 	// 直接返回即可 在调用方再判断是否为nil
 	// 找最后一个 key <= target的node 应返回当前节点
 	// 因为上面的第二个可能
+
+	// 如果当前move就是头节点
+	if move == s.head {
+		return nil
+	}
+
 	return move
 }
