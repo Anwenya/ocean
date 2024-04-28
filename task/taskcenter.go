@@ -36,12 +36,11 @@ func (tc *TaskCenter) doSubmit(channel chan *Task, task *Task) {
 	select {
 	case channel <- task:
 	default:
-		go tc.doSubmitSlow()
+		// 异步
+		go func() {
+			channel <- task
+		}()
 	}
-}
-
-func (tc *TaskCenter) doSubmitSlow() {
-
 }
 
 // GetTask 从多个任务channel中随机获得一个任务
@@ -52,6 +51,5 @@ func (tc *TaskCenter) GetTask() *Task {
 	case task = <-worldCloudTaskChannel:
 	case task = <-relationTaskChannel:
 	}
-
 	return task
 }
