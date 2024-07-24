@@ -5,6 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tealeg/xlsx"
 	"net/http"
+	"reflect"
 	"testing"
 )
 
@@ -15,6 +16,7 @@ func TestGin(t *testing.T) {
 	engine.POST("/client", clientPost)
 	engine.DELETE("/client", clientDelete)
 	engine.PUT("/client", clientPut)
+	engine.POST("/reflect", testReflect)
 	engine.Run(":8080")
 }
 
@@ -124,4 +126,25 @@ func clientPut(c *gin.Context) {
 		return
 	}
 	fmt.Println(p)
+}
+
+func testReflect(c *gin.Context) {
+	p := &P{}
+
+	type param struct {
+		Name string
+		Age  int
+	}
+
+	var ps param
+	if err := c.BindJSON(&ps); err != nil {
+		return
+	}
+	// 找对应的方法 找不到 -> 方法未找到状态码
+	productLinkageValue := reflect.ValueOf(p)
+	methodValue := productLinkageValue.MethodByName("Test")
+	in := []reflect.Value{reflect.ValueOf(ps.Name), reflect.ValueOf(ps.Age)}
+	// 调用对应方法
+	results := methodValue.Call(in)
+	fmt.Println(results[0].Int())
 }
